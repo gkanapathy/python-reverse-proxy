@@ -1,15 +1,15 @@
-from aiohttp import web
-import aiohttp
 import asyncio
 import logging
 
+import aiohttp
+from aiohttp import web
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+logging.basicConfig(level=logging.INFO)
 
 
-targetBaseUrl = "http://localhost:8501"
-mountPoint = "/"
+localMountPoint = "/"
 
 
 async def _wsforward(ws_from, ws_to):
@@ -36,26 +36,32 @@ class Handlers:
             await self._session.close()
 
     async def proxy_handler(self, upstream_req):
-        """
-        Here, check the upstream_req URL, ensure the user is authorized, then look up the correct URL/host/port for the incoming base URL.
-        Incoming base URL should be something like https://app.daisi.io/daisi-uuidbase/st/*.
-        The base portion (up to and including /st) should be removed and replaced with the correct base URL for the Daisi
-        by setting targetBaseUrl and mountPoint
-        """
-
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(auto_decompress=False)
 
+        """
+        Here, check the upstream_req URL, ensure the user is authorized, then look up the correct URL/host/port for the incoming base URL.
+        raise `web.HTTPNotFound()` exception in the handler if the URL is not authorized.
+        """
+        userAuthorized = True
+        if not userAuthorized:
+            raise web.HTTPNotFound()
+
+        if upstream_req.path_qs:
+            targetBaseUrl = "http://httpbin.org:80"
+        else:
+            raise web.HTTPNotFound()
+
         if (
-            upstream_req.headers["Connection"] == "Upgrade"
-            and upstream_req.headers["Upgrade"] == "websocket"
+            upstream_req.headers.get("Connection") == "Upgrade"
+            and upstream_req.headers.get("Upgrade") == "websocket"
             and upstream_req.method == "GET"
-        ):  
+        ):  # it's a websocket upgrade request
             upstream_ws_response = web.WebSocketResponse()
             await upstream_ws_response.prepare(upstream_req)
             async with self._session.ws_connect(
                 targetBaseUrl + upstream_req.path_qs,
-                headers={"Cookie": upstream_req.headers["cookie"]},
+                headers=dict(upstream_req.headers),
             ) as downstream_ws_client:
 
                 down2up = asyncio.create_task(
@@ -69,28 +75,53 @@ class Handlers:
                 )
                 return upstream_ws_response
 
-        else:  # it's a normal request
+        else:  # it's an HTTP request
+
             async with self._session.request(
                 upstream_req.method,
                 targetBaseUrl + upstream_req.path_qs,
                 headers=upstream_req.headers,
                 data=upstream_req.content,
             ) as downstream_response:
-                #TODO: handle chunked responses by streaming chunks instead of buffering
                 h = downstream_response.headers.copy()
-                h.pop("Transfer-Encoding", None)
-                upstream_resp = web.Response(
-                    body=await downstream_response.read(),
-                    status=downstream_response.status,
-                    headers=h,
-                )
+
+                # I was hoping this would work for both chunked and non-chunked responses, but it doesn't.
+                # upstream_resp = web.StreamResponse(status=downstream_response.status, reason=downstream_response.reason, headers=h)
+                # if h.get("Transfer-Encoding") == "chunked":
+                #     upstream_resp.enable_chunked_encoding()
+                # await upstream_resp.prepare(upstream_req)
+                # async for data,_ in downstream_response.content.iter_chunks():
+                #     await upstream_resp.write(data)
+
+                if h.get("Transfer-Encoding") == "chunked":
+                    upstream_resp = web.StreamResponse(
+                        status=downstream_response.status,
+                        reason=downstream_response.reason,
+                        headers=h,
+                    )
+                    upstream_resp.enable_chunked_encoding()
+                    await upstream_resp.prepare(upstream_req)
+                    async for data, _ in downstream_response.content.iter_chunks():
+                        await upstream_resp.write(data)
+                    await upstream_resp.write_eof()
+                    return upstream_resp
+                else:
+                    upstream_resp = web.Response(
+                        status=downstream_response.status,
+                        reason=downstream_response.reason,
+                        headers=h,
+                        body=await downstream_response.content.read(),
+                    )
+
                 return upstream_resp
 
 
 async def main():
     async with Handlers() as handlers:
         app = web.Application()
-        app.router.add_route("*", mountPoint + "{proxyPath:.*}", handlers.proxy_handler)
+        app.router.add_route(
+            "*", localMountPoint + "{proxyPath:.*}", handlers.proxy_handler
+        )
         runner = web.AppRunner(app, auto_decompress=False)
         await runner.setup()
         await web.TCPSite(runner, port=3984).start()
