@@ -37,7 +37,9 @@ class Handlers:
 
     async def proxy_handler(self, upstream_req):
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(auto_decompress=False)
+            self._session = aiohttp.ClientSession(
+                auto_decompress=False, cookie_jar=aiohttp.DummyCookieJar()
+            )
 
         """
         Here, check the upstream_req URL, ensure the user is authorized, then look up the correct URL/host/port for the incoming base URL.
@@ -82,6 +84,7 @@ class Handlers:
                 targetBaseUrl + upstream_req.path_qs,
                 headers=upstream_req.headers,
                 data=upstream_req.content,
+                allow_redirects=False,
             ) as downstream_response:
                 h = downstream_response.headers.copy()
 
