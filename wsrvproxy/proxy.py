@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from turtle import up
 
 import aiohttp
 from aiohttp import web
@@ -65,6 +66,9 @@ class Handlers:
                 targetBaseUrl + upstream_req.path_qs,
                 headers=dict(upstream_req.headers),
             ) as downstream_ws_client:
+                upstream_ws_response = web.WebSocketResponse(heartbeat=45)
+                upstream_ws_response._headers = downstream_ws_client._response._headers.copy()
+                await upstream_ws_response.prepare(upstream_req)
 
                 down2up = asyncio.create_task(
                     _wsforward(downstream_ws_client, upstream_ws_response)
